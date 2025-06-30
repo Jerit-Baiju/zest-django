@@ -6,14 +6,68 @@ from rest_framework import status
 from rest_framework.decorators import api_view
 from rest_framework.response import Response
 
-from base.models import Device
+from base.models import Device, VideoCall, CallQueue
 from base.serializers import DeviceSerializer
+
+
+@api_view(['POST'])
+def authenticate_with_token(request):
+    """
+    Authenticate user with Marian College token
+    """
+    try:
+        token = request.data.get('token')
+        
+        if not token:
+            return Response({
+                'error': 'Token is required'
+            }, status=status.HTTP_400_BAD_REQUEST)
+        
+        # Validate Marian College token format
+        if not token.startswith('MC_') or len(token) < 10:
+            return Response({
+                'error': 'Invalid Marian College token format'
+            }, status=status.HTTP_400_BAD_REQUEST)
+        
+        # Get client info for tracking
+        user_agent = request.META.get('HTTP_USER_AGENT', '')
+        ip_address = request.META.get('REMOTE_ADDR')
+        
+        # Get or create device with token
+        device, created = Device.objects.get_or_create(
+            token=token,
+            defaults={
+                'is_authenticated': True,
+                'user_agent': user_agent,
+                'ip_address': ip_address
+            }
+        )
+        
+        if not created:
+            device.is_authenticated = True
+            device.user_agent = user_agent
+            device.ip_address = ip_address
+            device.save()
+        
+        serializer = DeviceSerializer(device)
+        
+        return Response({
+            'device_uuid': str(device.uuid),
+            'message': 'Authentication successful! Welcome to onlyMC 💖',
+            'device_info': serializer.data
+        }, status=status.HTTP_200_OK)
+        
+    except Exception as e:
+        return Response({
+            'error': 'Authentication failed',
+            'details': str(e)
+        }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
 
 @api_view(['POST'])
 def get_or_create_device(request):
     """
-    Get or create a device UUID for tracking
+    Legacy endpoint - Create a device UUID for tracking
     """
     try:
         # Get client info for tracking
@@ -86,12 +140,15 @@ def api_status(request):
 @api_view(['GET'])
 def get_live_users(request):
     """
-    Get list of currently active users (last seen within 30 seconds)
+    Get list of currently active authenticated users (last seen within 30 seconds)
     """
     try:
-        # Get devices active in the last 30 seconds
+        # Get devices active in the last 30 seconds and authenticated
         cutoff_time = timezone.now() - timedelta(seconds=30)
-        active_devices = Device.objects.filter(last_seen__gte=cutoff_time).order_by('-last_seen')
+        active_devices = Device.objects.filter(
+            last_seen__gte=cutoff_time,
+            is_authenticated=True
+        ).order_by('-last_seen')
         
         # Serialize the data
         serializer = DeviceSerializer(active_devices, many=True)
@@ -131,8 +188,63 @@ def get_all_devices(request):
         }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
 
+@api_view(['GET'])
+def get_queue_status(request):
+    """
+    Get current queue status and statistics
+    """
+    try:
+        queue_count = CallQueue.objects.filter(is_active=True).count()
+        active_calls = VideoCall.objects.filter(status='active').count()
+        
+        return Response({
+            'queue_count': queue_count,
+            'active_calls': active_calls,
+            'timestamp': timezone.now().isoformat()
+        }, status=status.HTTP_200_OK)
+        
+    except Exception as e:
+        return Response({
+            'error': 'Failed to get queue status',
+            'details': str(e)
+        }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+
+@api_view(['GET'])
+def get_call_history(request):
+    """
+    Get call history for admin dashboard
+    """
+    try:
+        calls = VideoCall.objects.all().order_by('-started_at')[:50]  # Last 50 calls
+        
+        call_data = []
+        for call in calls:
+            call_data.append({
+                'id': str(call.id),
+                'participant1': str(call.participant1.uuid)[:8],
+                'participant2': str(call.participant2.uuid)[:8],
+                'started_at': call.started_at.isoformat(),
+                'ended_at': call.ended_at.isoformat() if call.ended_at else None,
+                'duration_seconds': call.duration_seconds,
+                'status': call.status
+            })
+        
+        return Response({
+            'calls': call_data,
+            'total_calls': VideoCall.objects.count(),
+            'timestamp': timezone.now().isoformat()
+        }, status=status.HTTP_200_OK)
+        
+    except Exception as e:
+        return Response({
+            'error': 'Failed to get call history',
+            'details': str(e)
+        }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+
 def live_users_dashboard(request):
     """
-    Render the live users dashboard
+    Render the onlyMC admin dashboard
     """
-    return render(request, 'live_users.html')
+    return render(request, 'admin_dashboard.html')
